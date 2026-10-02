@@ -454,40 +454,56 @@ def audio_backend():
     return "wpctl" if shutil_which("wpctl") else "pactl" if shutil_which("pactl") else None
 
 
+def output_sink():
+    """The sink whose volume is real loudness, or None to use the default output.
+
+    A DSP sink (an equalizer, EasyEffects) can be the default output without being
+    where loudness lives: changing its volume only changes the level going into the
+    processing. Omarchy's helper resolves through it to the physical sink it feeds.
+    """
+    if shutil_which("pactl") and shutil_which("omarchy-audio-output-sink"):
+        return cmd_output(["omarchy-audio-output-sink"]).strip() or None
+    return None
+
+
 def volume():
-    """(percent, muted) of the default output, via PipeWire (wpctl) or PulseAudio (pactl)."""
+    """(percent, muted) of the output, via PipeWire (wpctl) or PulseAudio (pactl)."""
     backend = audio_backend()
+    sink = output_sink()
     try:
+        if sink or backend == "pactl":
+            sink = sink or "@DEFAULT_SINK@"
+            vol = cmd_output(["pactl", "get-sink-volume", sink])  # "... / 42% / ..."
+            mute = cmd_output(["pactl", "get-sink-mute", sink])   # "Mute: yes"
+            return int(re.search(r"(\d+)%", vol).group(1)), mute.endswith("yes")
         if backend == "wpctl":
             out = cmd_output(["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"])  # "Volume: 0.42 [MUTED]"
             return round(float(out.split()[1]) * 100), "MUTED" in out
-        if backend == "pactl":
-            vol = cmd_output(["pactl", "get-sink-volume", "@DEFAULT_SINK@"])  # "... / 42% / ..."
-            mute = cmd_output(["pactl", "get-sink-mute", "@DEFAULT_SINK@"])   # "Mute: yes"
-            return int(re.search(r"(\d+)%", vol).group(1)), mute.endswith("yes")
     except (IndexError, ValueError, AttributeError):
         pass
     return None, False
 
 
 def change_volume(percent):
-    """Raise (positive) or lower the default output's volume, capped at 100%."""
+    """Raise (positive) or lower the output's volume, capped at 100%."""
     backend = audio_backend()
-    if backend == "wpctl":
-        cmd = ["wpctl", "set-volume"] + (["-l", "1.0"] if percent > 0 else [])
-        subprocess.run(cmd + ["@DEFAULT_AUDIO_SINK@", f"{abs(percent)}%{'+' if percent > 0 else '-'}"], timeout=2)
-    elif backend == "pactl":
+    sink = output_sink()
+    if sink or backend == "pactl":
         vol, _ = volume()
         target = max(0, min(100, (vol or 0) + percent))
-        subprocess.run(["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{target}%"], timeout=2)
+        subprocess.run(["pactl", "set-sink-volume", sink or "@DEFAULT_SINK@", f"{target}%"], timeout=2)
+    elif backend == "wpctl":
+        cmd = ["wpctl", "set-volume"] + (["-l", "1.0"] if percent > 0 else [])
+        subprocess.run(cmd + ["@DEFAULT_AUDIO_SINK@", f"{abs(percent)}%{'+' if percent > 0 else '-'}"], timeout=2)
 
 
 def toggle_mute():
     backend = audio_backend()
-    if backend == "wpctl":
+    sink = output_sink()
+    if sink or backend == "pactl":
+        subprocess.run(["pactl", "set-sink-mute", sink or "@DEFAULT_SINK@", "toggle"], timeout=2)
+    elif backend == "wpctl":
         subprocess.run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"], timeout=2)
-    elif backend == "pactl":
-        subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "toggle"], timeout=2)
 
 
 def render_lcd(state, theme):
